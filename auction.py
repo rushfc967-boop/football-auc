@@ -1,26 +1,21 @@
 import asyncio
 import time
-from config import (
-    COOLDOWN_SECONDS, TOTAL_TIMER, REMINDER_AT,
-    SQUAD_SIZE, MIN_BASE_PRICE
-)
+import math
+from config import COUNTDOWN_SECONDS, REMINDER_AT, SQUAD_SIZE, MIN_BASE_PRICE
 from database import (
     get_state, update_state, get_all_teams, get_team, update_team,
     get_player, update_player, log_sold, get_min_base_price, get_sold_by_team,
-    get_next_player_in_set, count_pending_in_set, count_total_in_set,
-    get_set_players, get_set_position, get_total_sets
+    get_next_player_in_set, get_set_players, get_set_position, get_total_sets
 )
 
 SET_ICONS = {"GK": "🧤", "DEF": "🛡️", "MID": "🎯", "FWD": "⚡"}
 SET_LABELS = {"GK": "GOALKEEPERS", "DEF": "DEFENDERS", "MID": "MIDFIELDERS", "FWD": "FORWARDS"}
 
-# Lock to prevent concurrent next_player calls
 _next_lock = asyncio.Lock()
 
 
 def find_team_by_user(user_id, username):
-    teams = get_all_teams()
-    for t in teams:
+    for t in get_all_teams():
         owner = t["owner_username"]
         if not owner:
             continue
@@ -33,9 +28,7 @@ def find_team_by_user(user_id, username):
 
 def set_header(set_id):
     pos, part = get_set_position(set_id)
-    icon = SET_ICONS.get(pos, "📦")
-    label = SET_LABELS.get(pos, pos)
-    return f"{icon} {label} (Part {part})"
+    return f"{SET_ICONS.get(pos, '📦')} {SET_LABELS.get(pos, pos)} (Part {part})"
 
 
 def validate_bid(user_id, username, amount):
@@ -51,34 +44,45 @@ def validate_bid(user_id, username, amount):
         return False, f"❌ {team['name']} squad is full (15/15)"
     if state["highest_team_id"] == team["id"]:
         return False, "❌ You are already the highest bidder"
-    if amount <= state["highest_bid"]:
-        return False, f"❌ Bid must be > {state['highest_bid']} M"
+
+    player = get_player(state["current_player_id"]) if state["current_player_id"] else None
+    if not player:
+        return False, "❌ No active player"
+
+    base_ceil = math.ceil(player["base_price"])
+
+    if state["highest_bid"] == 0:
+        # First bid — must be >= ceil(base)
+        if amount < base_ceil:
+            return False, f"❌ Min first bid: {base_ceil}M (base: {player['base_price']}M → rounded up)"
+    else:
+        if amount <= state["highest_bid"]:
+            return False, f"❌ Bid must be > {state['highest_bid']}M"
+
     remaining_budget = team["budget"] - team["spent"]
     if amount > remaining_budget:
-        return False, f"❌ Insufficient budget (max {remaining_budget:.2f} M)"
+        return False, f"❌ Insufficient budget (max {remaining_budget:.2f}M)"
     slots_after = team["slots_left"] - 1
     min_base = get_min_base_price() or MIN_BASE_PRICE
     max_allowed = remaining_budget - (slots_after * min_base)
     if amount > max_allowed:
-        return False, f"❌ Max allowed: {max_allowed:.2f} M"
+        return False, f"❌ Max allowed: {max_allowed:.2f}M"
     return True, team
 
 
 def build_live_text(player, state, countdown=None):
     set_id = state["current_set"] or 1
-    header = set_header(set_id)
-    lines = [f"📦 SET {set_id}: {header}", "━━━━━━━━━━━━━━━━━━━",
+    lines = [f"📦 SET {set_id}: {set_header(set_id)}", "━━━━━━━━━━━━━━━━━━━",
              f"⚽ {player['name']}",
-             f"📍 {player['position']} | 💰 Base: {player['base_price']} M", ""]
+             f"📍 {player['position']} | 💰 Base: {math.ceil(player['base_price'])}M", ""]
     if state["highest_bid"] > 0 and state["highest_team_id"]:
         team = get_team(state["highest_team_id"])
         if team:
-            lines.append(f"🔥 Current: {state['highest_bid']} M by {team['name']}")
-    if countdown is not None:
-        if countdown > 0:
-            lines.append(f"⏰ {countdown} seconds left!")
-        else:
-            lines.append("🔓 Bidding OPEN")
+            lines.append(f"🔥 Current: {state['highest_bid']}M by {team['name']}")
+    if countdown is not None and countdown > 0:
+        lines.append(f"⏰ {countdown} seconds left!")
+    elif countdown is not None:
+        lines.append("🔓 Bidding OPEN")
     lines.append("")
     lines.append("💡 /bid <amount> to bid")
     return "\n".join(lines)
@@ -98,12 +102,11 @@ async def update_live_message(bot, chat_id, text):
 
 async def show_set_preview(bot, chat_id, set_id):
     players = get_set_players(set_id)
-    header = set_header(set_id)
     lines = [f"📋 SET {set_id} PREVIEW",
-             f"📦 {header} — {len(players)} players",
+             f"📦 {set_header(set_id)} — {len(players)} players",
              "━━━━━━━━━━━━━━━━━━━"]
     for i, p in enumerate(players, 1):
-        lines.append(f"{i}. {p['name']} ({p['position']}) — {p['base_price']} M")
+        lines.append(f"{i}. {p['name']} ({p['position']}) — {math.ceil(p['base_price'])}M")
     lines.append("━━━━━━━━━━━━━━━━━━━")
     text = "\n".join(lines)
     for i in range(0, len(text), 4000):
@@ -124,66 +127,59 @@ async def finalize_sold(bot, chat_id):
         update_player(player["id"], status="sold")
         log_sold(player["id"], team["id"], price)
         remaining = team["budget"] - new_spent
-        text = ("━━━━━━━━━━━━━━━━━━━\n"
-                f"🔨 SOLD!\n⚽ {player['name']}\n"
-                f"👥 {team['name']}\n💰 {price} M\n"
-                "━━━━━━━━━━━━━━━━━━━\n"
-                f"💵 {team['name']}: {remaining:.2f} M | {new_slots} slots")
-        await bot.send_message(chat_id=chat_id, text=text)
+        await bot.send_message(chat_id=chat_id,
+            text=(f"━━━━━━━━━━━━━━━━━━━\n🔨 SOLD!\n⚽ {player['name']}\n"
+                  f"👥 {team['name']}\n💰 {price}M\n━━━━━━━━━━━━━━━━━━━\n"
+                  f"💵 {team['name']}: {remaining:.2f}M | {new_slots} slots"))
     else:
         update_player(player["id"], status="unsold")
-        text = ("━━━━━━━━━━━━━━━━━━━\n"
-                f"🔨 UNSOLD!\n⚽ {player['name']} | Base: {player['base_price']} M\n"
-                "━━━━━━━━━━━━━━━━━━━")
-        await bot.send_message(chat_id=chat_id, text=text)
-
-    # Clear current player so loop can pick next one
-    update_state(current_player_id=None, highest_bid=0, highest_team_id=None)
+        await bot.send_message(chat_id=chat_id,
+            text=(f"━━━━━━━━━━━━━━━━━━━\n🔨 UNSOLD!\n"
+                  f"⚽ {player['name']} | Base: {math.ceil(player['base_price'])}M\n━━━━━━━━━━━━━━━━━━━"))
+    update_state(current_player_id=None, highest_bid=0, highest_team_id=None, last_bid_time=0, last_reminder=None)
 
 
 async def next_player(bot, chat_id):
     async with _next_lock:
-        # Double-check: someone else already set one?
         state = get_state()
         if state["current_player_id"]:
-            existing = get_player(state["current_player_id"])
-            if existing and existing["status"] == "pending":
+            p = get_player(state["current_player_id"])
+            if p and p["status"] == "pending":
                 return
 
         set_id = state["current_set"] or 1
-        total_sets = get_total_sets()
-
+        total = get_total_sets()
         player = get_next_player_in_set(set_id)
 
-        # Move to next set if current empty
-        while not player and set_id < total_sets:
-            set_id += 1
-            update_state(current_set=set_id)
+        # Current set finished — pause and wait for /resume
+        if not player:
+            if set_id >= total:
+                await end_auction(bot, chat_id)
+                return
+            next_set = set_id + 1
+            update_state(status="set_complete", current_set=next_set)
             await bot.send_message(
                 chat_id=chat_id,
-                text=f"✅ SET {set_id-1} COMPLETE\n\n📦 Moving to SET {set_id}..."
+                text=f"✅ SET {set_id} COMPLETE\n━━━━━━━━━━━━━━━━━━━"
             )
-            await asyncio.sleep(2)
-            await show_set_preview(bot, chat_id, set_id)
-            await asyncio.sleep(3)
-            player = get_next_player_in_set(set_id)
-
-        if not player:
-            await end_auction(bot, chat_id)
+            await asyncio.sleep(1)
+            await show_set_preview(bot, chat_id, next_set)
+            await asyncio.sleep(1)
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"👑 Host: /resume to start SET {next_set}"
+            )
             return
 
         update_state(
             current_player_id=player["id"],
             highest_bid=0, highest_team_id=None,
-            last_bid_time=time.time(), last_reminder=None,
-            live_message_id=None
+            last_bid_time=time.time(),
+            last_reminder=None, live_message_id=None
         )
-
-        header = set_header(set_id)
-        text = (f"📦 SET {set_id}: {header}\n━━━━━━━━━━━━━━━━━━━\n"
-                f"⚽ {player['name']}\n📍 {player['position']} | 💰 Base: {player['base_price']} M\n"
-                "🔓 Bidding OPEN\n━━━━━━━━━━━━━━━━━━━\n"
-                "💡 /bid <amount> to bid")
+        text = (f"📦 SET {set_id}: {set_header(set_id)}\n━━━━━━━━━━━━━━━━━━━\n"
+                f"⚽ {player['name']}\n📍 {player['position']} | 💰 Base: {math.ceil(player['base_price'])}M\n"
+                "🔓 Bidding OPEN\n━━━━━━━━━━━━━━━━━━━\n💡 /bid <amount> to bid")
         msg = await bot.send_message(chat_id=chat_id, text=text)
         update_state(live_message_id=msg.message_id)
 
@@ -195,10 +191,10 @@ async def auction_loop(bot, chat_id):
             state = get_state()
             if state["status"] == "paused":
                 continue
+            if state["status"] == "set_complete":
+                continue
             if state["status"] != "live":
                 continue
-
-            # No active player → advance
             if not state["current_player_id"]:
                 await next_player(bot, chat_id)
                 continue
@@ -208,28 +204,29 @@ async def auction_loop(bot, chat_id):
                 update_state(current_player_id=None)
                 continue
 
-            elapsed = time.time() - state["last_bid_time"]
-            remaining = TOTAL_TIMER - elapsed
-            countdown = int(remaining - COOLDOWN_SECONDS)
-
-            if remaining > COOLDOWN_SECONDS:
-                if state["last_reminder"] != -1:
-                    text = build_live_text(player, state, None)
-                    await update_live_message(bot, chat_id, text)
-                    update_state(last_reminder=-1)
+            if state["last_bid_time"] == 0:
+                update_state(last_bid_time=time.time())
                 continue
 
-            if countdown <= 0:
+            elapsed = time.time() - state["last_bid_time"]
+            remaining = COUNTDOWN_SECONDS - elapsed
+            countdown = max(0, math.ceil(remaining))
+
+            if remaining <= 0:
                 await finalize_sold(bot, chat_id)
                 if all_teams_full():
                     await end_auction(bot, chat_id)
-                # Loop will pick up next player on next tick
                 await asyncio.sleep(1.5)
                 continue
 
+            # Send reminder as SEPARATE message
             if countdown in REMINDER_AT and state["last_reminder"] != countdown:
-                text = build_live_text(player, state, countdown)
-                await update_live_message(bot, chat_id, text)
+                team = get_team(state["highest_team_id"]) if state["highest_team_id"] else None
+                bid_line = f"🔥 {state['highest_bid']}M by {team['name']}" if team else "❌ No bids yet"
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=f"⏰ {countdown} seconds left!\n{bid_line}"
+                )
                 update_state(last_reminder=countdown)
 
         except Exception as e:
@@ -252,7 +249,7 @@ async def end_auction(bot, chat_id):
         lines.append(f"🏆 {t['name']}")
         lines.append(f"   Spent: {spent:.2f}M | Left: {left:.2f}M | Squad: {len(sold)}/15")
         for s in sold:
-            lines.append(f"   • {s['name']} ({s['position']}) — {s['price']} M")
+            lines.append(f"   • {s['name']} ({s['position']}) — {s['price']}M")
         lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━")
     text = "\n".join(lines)
@@ -272,7 +269,11 @@ def resume_auction():
     state = get_state()
     if state["status"] != "paused":
         return False, "Auction is not paused"
-    update_state(status="live", last_bid_time=time.time())
+    # Resume with fresh 10s timer IF timer was already running
+    if state["highest_bid"] > 0:
+        update_state(status="live", last_bid_time=time.time(), last_reminder=None)
+    else:
+        update_state(status="live")
     return True, "resumed"
 
 
@@ -286,31 +287,29 @@ async def skip_player(bot, chat_id):
     if not player:
         return False, "Player not found"
     update_player(player["id"], status="unsold")
-    await bot.send_message(
-        chat_id=chat_id,
-        text=f"⏭️ SKIPPED\n⚽ {player['name']} → UNSOLD"
-    )
-    update_state(current_player_id=None, highest_bid=0, highest_team_id=None)
+    await bot.send_message(chat_id=chat_id, text=f"⏭️ SKIPPED\n⚽ {player['name']} → UNSOLD")
+    update_state(current_player_id=None, highest_bid=0, highest_team_id=None, last_bid_time=0, last_reminder=None)
     return True, "skipped"
 
 
 async def start_round2(bot, chat_id):
     from database import get_conn
     conn = get_conn()
-    row = conn.execute("SELECT COUNT(*) FROM players WHERE status='unsold'").fetchone()
-    cnt = row[0] if row else 0
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM players WHERE status='unsold'")
+    cnt = cur.fetchone()[0]
+    cur.close()
     conn.close()
     if cnt == 0:
         return False, "No unsold players"
+    from database import _execute
     conn = get_conn()
-    conn.execute("UPDATE players SET status='pending' WHERE status='unsold'")
-    conn.commit()
+    _execute(conn, "UPDATE players SET status='pending' WHERE status='unsold'")
     conn.close()
-    update_state(status="live", last_bid_time=time.time(), highest_bid=0,
+    update_state(status="live", last_bid_time=0, highest_bid=0,
                  highest_team_id=None, current_player_id=None,
                  last_reminder=None, live_message_id=None)
-    await bot.send_message(chat_id=chat_id,
-                           text=f"📦 ROUND 2: {cnt} unsold players back in pool")
+    await bot.send_message(chat_id=chat_id, text=f"📦 ROUND 2: {cnt} unsold players back in pool")
     return True, "started"
 
 
@@ -320,28 +319,33 @@ def export_csv():
     from database import get_conn
     os.makedirs(EXPORT_DIR, exist_ok=True)
     conn = get_conn()
+    cur = conn.cursor()
 
     p1 = os.path.join(EXPORT_DIR, "final_squads.csv")
     with open(p1, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["Team", "Player", "Position", "Price"])
-        for r in conn.execute("SELECT t.name, p.name, p.position, s.price FROM sold s JOIN teams t ON t.id=s.team_id JOIN players p ON p.id=s.player_id ORDER BY t.name, s.id").fetchall():
-            w.writerow([r[0], r[1], r[2], r[3]])
+        cur.execute("SELECT t.name, p.name, p.position, s.price FROM sold s JOIN teams t ON t.id=s.team_id JOIN players p ON p.id=s.player_id ORDER BY t.name, s.id")
+        for r in cur.fetchall():
+            w.writerow(list(r))
 
     p2 = os.path.join(EXPORT_DIR, "team_summary.csv")
     with open(p2, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["Team", "Owner", "Spent", "Left", "SquadCount"])
-        for r in conn.execute("SELECT name, owner_username, spent, budget, slots_left FROM teams ORDER BY name").fetchall():
+        cur.execute("SELECT name, owner_username, spent, budget, slots_left FROM teams ORDER BY name")
+        for r in cur.fetchall():
             w.writerow([r[0], r[1], round(r[2], 2), round(r[3]-r[2], 2), 15-r[4]])
 
     p3 = os.path.join(EXPORT_DIR, "unsold_players.csv")
     with open(p3, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["Player", "Position", "BasePrice"])
-        for r in conn.execute("SELECT name, position, base_price FROM players WHERE status='unsold'").fetchall():
-            w.writerow([r[0], r[1], r[2]])
+        cur.execute("SELECT name, position, base_price FROM players WHERE status='unsold'")
+        for r in cur.fetchall():
+            w.writerow(list(r))
 
+    cur.close()
     conn.close()
     return [p1, p2, p3]
 
@@ -349,6 +353,9 @@ def export_csv():
 def get_top_buys(limit=10):
     from database import get_conn
     conn = get_conn()
-    rows = conn.execute("SELECT p.name AS pname, p.position AS pos, s.price AS price, t.name AS tname FROM sold s JOIN players p ON p.id=s.player_id JOIN teams t ON t.id=s.team_id ORDER BY s.price DESC LIMIT ?", (limit,)).fetchall()
+    cur = conn.cursor()
+    cur.execute("SELECT p.name, p.position, s.price, t.name FROM sold s JOIN players p ON p.id=s.player_id JOIN teams t ON t.id=s.team_id ORDER BY s.price DESC LIMIT %s" if hasattr(conn, 'cursor') and 'psycopg' in str(type(conn)).lower() else "SELECT p.name, p.position, s.price, t.name FROM sold s JOIN players p ON p.id=s.player_id JOIN teams t ON t.id=s.team_id ORDER BY s.price DESC LIMIT ?", (limit,))
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
-    return [dict(r) for r in rows]
+    return [{"pname": r[0], "pos": r[1], "price": r[2], "tname": r[3]} for r in rows]

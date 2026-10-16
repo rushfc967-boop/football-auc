@@ -6,7 +6,7 @@ from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, ContextTypes
 )
 
-from config import BOT_TOKEN, MIN_TEAMS, MAX_TEAMS, SQUAD_SIZE
+from config import BOT_TOKEN, MIN_TEAMS, MAX_TEAMS, SQUAD_SIZE, OWNER_ID
 from database import (
     init_db, get_state, update_state, get_all_teams, get_team,
     add_team, get_sold_by_team, count_players, count_by_position,
@@ -184,13 +184,53 @@ async def bid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @host_only
 async def pause_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ok, msg = pause_auction()
-    await update.message.reply_text("⏸️ PAUSED" if ok else f"❌ {msg}")
+    await update.message.reply_text("⏸️ PAUSED\n/resume (next set) or /auc_resume (unpause)" if ok else f"❌ {msg}")
 
 
-@host_only
+async def auc_resume_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Resume after /pause (timer resume)"""
+    state = get_state()
+    user_id = update.effective_user.id
+
+    if not is_host(user_id) and user_id != OWNER_ID:
+        await update.message.reply_text("❌ Host only.")
+        return
+
+    if state["status"] != "paused":
+        await update.message.reply_text(f"❌ Auction paused nahi hai. Status: {state['status']}")
+        return
+
+    if state["highest_bid"] > 0:
+        update_state(status="live", last_bid_time=time.time(), last_reminder=None)
+    else:
+        update_state(status="live")
+    await update.message.reply_text("▶️ Auction RESUMED")
+
+
 async def resume_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    ok, msg = resume_auction()
-    await update.message.reply_text("▶️ RESUMED" if ok else f"❌ {msg}")
+    """Start next set (only after SET COMPLETE)"""
+    state = get_state()
+    user_id = update.effective_user.id
+
+    if not is_host(user_id) and user_id != OWNER_ID:
+        await update.message.reply_text("❌ Host only.")
+        return
+
+    if state["status"] != "set_complete":
+        await update.message.reply_text(
+            f"❌ No set waiting. Status: {state['status']}\n"
+            f"(Use /auc_resume to unpause)"
+        )
+        return
+
+    set_id = state["current_set"]
+    await update.message.reply_text(f"▶️ Starting SET {set_id}...")
+    await asyncio.sleep(1)
+    update_state(
+        status="live", last_bid_time=0, highest_bid=0,
+        highest_team_id=None, current_player_id=None,
+        last_reminder=None, live_message_id=None
+    )
 
 
 async def squad_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -285,6 +325,18 @@ async def top_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+async def clearsession_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Owner only command.")
+        return
+    reset_auction()
+    await update.message.reply_text(
+        "🧹 SESSION CLEARED\n━━━━━━━━━━━━━━━━━━━\n"
+        "✅ Teams deleted\n✅ Sold reset\n✅ Players pending\n"
+        "✅ Host cleared\n\n/add_teams to start fresh."
+    )
+
+
 async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = get_state()
     if state["status"] not in ("live", "paused"):
@@ -308,7 +360,8 @@ async def set_commands(app: Application):
         BotCommand("start_auction", "Begin auction (host)"),
         BotCommand("bid", "Bid: /bid 2.5"),
         BotCommand("pause", "Pause (host)"),
-        BotCommand("resume", "Resume (host)"),
+        BotCommand("resume", "Start next set (host)"),
+        BotCommand("auc_resume", "Resume paused auction (host)"),
         BotCommand("skip", "Skip player (host)"),
         BotCommand("squad", "View squad"),
         BotCommand("purse", "All budgets"),
@@ -319,6 +372,7 @@ async def set_commands(app: Application):
         BotCommand("export", "Download CSVs (host)"),
         BotCommand("end", "End auction (host)"),
         BotCommand("reset", "Reset all (host)"),
+        BotCommand("clearsession", "Clear session (owner)"),
     ]
     await app.bot.set_my_commands(cmds)
 
@@ -339,6 +393,7 @@ def main():
     app.add_handler(CommandHandler("bid", bid_cmd))
     app.add_handler(CommandHandler("pause", pause_cmd))
     app.add_handler(CommandHandler("resume", resume_cmd))
+    app.add_handler(CommandHandler("auc_resume", auc_resume_cmd))
     app.add_handler(CommandHandler("skip", skip_cmd))
     app.add_handler(CommandHandler("squad", squad_cmd))
     app.add_handler(CommandHandler("purse", purse_cmd))
@@ -349,6 +404,7 @@ def main():
     app.add_handler(CommandHandler("export", export_cmd))
     app.add_handler(CommandHandler("end", end_cmd))
     app.add_handler(CommandHandler("reset", reset_cmd))
+    app.add_handler(CommandHandler("clearsession", clearsession_cmd))
     app.add_handler(CallbackQueryHandler(become_host_callback, pattern="^become_host$"))
     app.add_error_handler(error_handler)
     app.post_init = set_commands
