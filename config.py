@@ -3,11 +3,10 @@ from dotenv import load_dotenv
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN missing in .env file!")
+    raise ValueError("BOT_TOKEN missing!")
 
 BUDGET_PER_TEAM = 500.0
 SQUAD_SIZE = 15
-
 MIN_TEAMS = 2
 MAX_TEAMS = 20
 
@@ -20,5 +19,6 @@ SET_ORDER = ["GK", "DEF", "MID", "FWD"]
 SET_NAMES = {"GK": "🧤 GOALKEEPERS", "DEF": "🛡️ DEFENDERS", "MID": "🎯 MIDFIELDERS", "FWD": "⚡ FORWARDS"}
 
 MIN_BASE_PRICE = 3
-DB_PATH = "auction.db"
-EXPORT_DIR = "exports"
+# DB path from env (Railway volume) or local default
+DB_PATH = os.getenv("DB_PATH", "auction.db")
+EXPORT_DIR = os.getenv("EXPORT_DIR", "exports")
