@@ -337,6 +337,23 @@ async def clearsession_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def seed_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Owner only command.")
+        return
+    await update.message.reply_text("🌱 Seeding pool... please wait.")
+    try:
+        from seeder import seed_pool
+        count = seed_pool(clear_existing=True)
+        from database import count_by_position
+        await update.message.reply_text(
+            f"✅ Seeded {count} players!\n"
+            f"Breakdown: {count_by_position()}"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Seed failed: {e}")
+
+
 async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = get_state()
     if state["status"] not in ("live", "paused"):
@@ -373,6 +390,7 @@ async def set_commands(app: Application):
         BotCommand("end", "End auction (host)"),
         BotCommand("reset", "Reset all (host)"),
         BotCommand("clearsession", "Clear session (owner)"),
+        BotCommand("seed", "Seed player pool (owner)"),
     ]
     await app.bot.set_my_commands(cmds)
 
@@ -405,6 +423,7 @@ def main():
     app.add_handler(CommandHandler("end", end_cmd))
     app.add_handler(CommandHandler("reset", reset_cmd))
     app.add_handler(CommandHandler("clearsession", clearsession_cmd))
+    app.add_handler(CommandHandler("seed", seed_cmd))
     app.add_handler(CallbackQueryHandler(become_host_callback, pattern="^become_host$"))
     app.add_error_handler(error_handler)
     app.post_init = set_commands
