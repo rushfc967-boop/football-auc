@@ -19,6 +19,7 @@ SET_ICONS = {"GK": "🧤", "DEF": "🛡️", "MID": "🎯", "FWD": "⚡"}
 SET_LABELS = {"GK": "GOALKEEPERS", "DEF": "DEFENDERS", "MID": "MIDFIELDERS", "FWD": "FORWARDS"}
 
 _next_lock = asyncio.Lock()
+_finalize_lock = asyncio.Lock()
 
 
 def find_team_by_user(user_id, username):
@@ -121,10 +122,14 @@ async def show_set_preview(bot, chat_id, set_id):
 
 
 async def finalize_sold(bot, chat_id):
-    state = get_state()
-    player = get_player(state["current_player_id"])
-    if not player:
-        return
+    async with _finalize_lock:  # 🔒 LOCK ADDED
+        state = get_state()
+        # Double check: if already finalized by another process, abort
+        if not state["current_player_id"]:
+            return
+        player = get_player(state["current_player_id"])
+        if not player:
+            return
     if state["highest_bid"] > 0 and state["highest_team_id"]:
         team = get_team(state["highest_team_id"])
         price = state["highest_bid"]
