@@ -24,6 +24,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def save_context(update):
+    try:
+        tid = update.message.message_thread_id if update.message else None
+        update_state(chat_id=update.effective_chat.id, thread_id=tid)
+    except Exception:
+        pass
+
 def is_host(user_id):
     return get_state()["host_id"] == user_id
 
@@ -38,6 +45,7 @@ def host_only(func):
 
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_context(update)
     state = get_state()
     user = update.effective_user
     if state["host_id"]:
@@ -69,6 +77,7 @@ async def become_host_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def claim_host(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_context(update)
     state = get_state()
     user = update.effective_user
     if state["host_id"] == user.id:
@@ -80,6 +89,7 @@ async def claim_host(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @host_only
 async def add_teams(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_context(update)
     lines = update.message.text.split("\n")[1:]
     if not lines or all(not l.strip() for l in lines):
         await update.message.reply_text(
@@ -112,6 +122,7 @@ async def add_teams(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @host_only
 async def lock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_context(update)
     teams = get_all_teams()
     n = len(teams)
     if n < MIN_TEAMS:
@@ -140,6 +151,7 @@ async def lock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @host_only
 async def start_auction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_context(update)
     state = get_state()
     if state["status"] not in ("locked", "idle"):
         await update.message.reply_text(f"❌ Cannot start. Status: {state['status']}")
@@ -151,13 +163,15 @@ async def start_auction(update: Update, context: ContextTypes.DEFAULT_TYPE):
         last_reminder=None, live_message_id=None
     )
     await update.message.reply_text("🏆 AUCTION STARTING...")
-    if "auction_task" not in context.application.bot_data:
+    if "auction_task" not in context.application.bot_data or context.application.bot_data["auction_task"].done():
         task = asyncio.create_task(auction_loop(context.bot, update.effective_chat.id))
         context.application.bot_data["auction_task"] = task
-    # Loop will pick up the first player automatically
+    # Force first player immediately
+    await next_player(context.bot, update.effective_chat.id)
 
 
 async def bid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_context(update)
     if not context.args:
         await update.message.reply_text("Usage: /bid <amount>")
         return
@@ -183,11 +197,13 @@ async def bid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @host_only
 async def pause_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_context(update)
     ok, msg = pause_auction()
     await update.message.reply_text("⏸️ PAUSED\n/resume (next set) or /auc_resume (unpause)" if ok else f"❌ {msg}")
 
 
 async def auc_resume_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_context(update)
     """Resume after /pause (timer resume)"""
     state = get_state()
     user_id = update.effective_user.id
@@ -208,6 +224,7 @@ async def auc_resume_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def resume_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_context(update)
     """Start next set (only after SET COMPLETE)"""
     state = get_state()
     user_id = update.effective_user.id
@@ -234,6 +251,7 @@ async def resume_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def squad_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_context(update)
     if context.args:
         name = " ".join(context.args)
         team = None
@@ -260,6 +278,7 @@ async def squad_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def purse_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_context(update)
     lines = ["💰 BUDGET", "━━━━━━━━━━━━━━━━━━━"]
     for t in get_all_teams():
         left = t["budget"] - t["spent"]
@@ -268,23 +287,27 @@ async def purse_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def pool_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_context(update)
     total = count_players()
     await update.message.reply_text(f"⚽ TOTAL: {total}\n{count_by_position()}")
 
 
 @host_only
 async def end_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_context(update)
     await end_auction(context.bot, update.effective_chat.id)
 
 
 @host_only
 async def reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_context(update)
     reset_auction()
     await update.message.reply_text("🔄 Reset. /add_teams to start fresh.")
 
 
 @host_only
 async def skip_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_context(update)
     ok, msg = await skip_player(context.bot, update.effective_chat.id)
     if not ok:
         await update.message.reply_text(f"❌ {msg}")
@@ -292,6 +315,7 @@ async def skip_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @host_only
 async def round2_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_context(update)
     ok, msg = await start_round2(context.bot, update.effective_chat.id)
     if not ok:
         await update.message.reply_text(f"❌ {msg}")
@@ -299,6 +323,7 @@ async def round2_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @host_only
 async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_context(update)
     try:
         files = export_csv()
         for path in files:
@@ -309,6 +334,7 @@ async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def top_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_context(update)
     limit = 10
     if context.args:
         try:
@@ -326,6 +352,7 @@ async def top_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def clearsession_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_context(update)
     if update.effective_user.id != OWNER_ID:
         await update.message.reply_text("❌ Owner only command.")
         return
@@ -338,6 +365,7 @@ async def clearsession_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def seed_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_context(update)
     if update.effective_user.id != OWNER_ID:
         await update.message.reply_text("❌ Owner only command.")
         return
@@ -355,6 +383,7 @@ async def seed_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_context(update)
     state = get_state()
     if state["status"] not in ("live", "paused"):
         await update.message.reply_text("Auction not running.")

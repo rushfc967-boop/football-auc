@@ -8,6 +8,13 @@ from database import (
     get_next_player_in_set, get_set_players, get_set_position, get_total_sets
 )
 
+def _msg_kwargs():
+    state = get_state()
+    tid = state.get("thread_id")
+    if tid:
+        return {"message_thread_id": tid}
+    return {}
+
 SET_ICONS = {"GK": "🧤", "DEF": "🛡️", "MID": "🎯", "FWD": "⚡"}
 SET_LABELS = {"GK": "GOALKEEPERS", "DEF": "DEFENDERS", "MID": "MIDFIELDERS", "FWD": "FORWARDS"}
 
@@ -97,7 +104,7 @@ async def update_live_message(bot, chat_id, text):
         except Exception:
             pass
     msg = await bot.send_message(chat_id=chat_id, text=text)
-    update_state(live_message_id=msg.message_id)
+    update_state(live_message_id=msg.message_id, **_msg_kwargs())
 
 
 async def show_set_preview(bot, chat_id, set_id):
@@ -110,7 +117,7 @@ async def show_set_preview(bot, chat_id, set_id):
     lines.append("━━━━━━━━━━━━━━━━━━━")
     text = "\n".join(lines)
     for i in range(0, len(text), 4000):
-        await bot.send_message(chat_id=chat_id, text=text[i:i+4000])
+        await bot.send_message(chat_id=chat_id, text=text[i:i+4000], **_msg_kwargs())
 
 
 async def finalize_sold(bot, chat_id):
@@ -127,15 +134,13 @@ async def finalize_sold(bot, chat_id):
         update_player(player["id"], status="sold")
         log_sold(player["id"], team["id"], price)
         remaining = team["budget"] - new_spent
-        await bot.send_message(chat_id=chat_id,
-            text=(f"━━━━━━━━━━━━━━━━━━━\n🔨 SOLD!\n⚽ {player['name']}\n"
+        await bot.send_message(chat_id=chat_id, text=(f"━━━━━━━━━━━━━━━━━━━\n🔨 SOLD!\n⚽ {player['name']}\n"
                   f"👥 {team['name']}\n💰 {price}M\n━━━━━━━━━━━━━━━━━━━\n"
-                  f"💵 {team['name']}: {remaining:.2f}M | {new_slots} slots"))
+                  f"💵 {team['name']}: {remaining:.2f}M | {new_slots} slots"), **_msg_kwargs())
     else:
         update_player(player["id"], status="unsold")
-        await bot.send_message(chat_id=chat_id,
-            text=(f"━━━━━━━━━━━━━━━━━━━\n🔨 UNSOLD!\n"
-                  f"⚽ {player['name']} | Base: {math.ceil(player['base_price'])}M\n━━━━━━━━━━━━━━━━━━━"))
+        await bot.send_message(chat_id=chat_id, text=(f"━━━━━━━━━━━━━━━━━━━\n🔨 UNSOLD!\n"
+                  f"⚽ {player['name']} | Base: {math.ceil(player['base_price'])}M\n━━━━━━━━━━━━━━━━━━━"), **_msg_kwargs())
     update_state(current_player_id=None, highest_bid=0, highest_team_id=None, last_bid_time=0, last_reminder=None)
 
 
@@ -158,17 +163,13 @@ async def next_player(bot, chat_id):
                 return
             next_set = set_id + 1
             update_state(status="set_complete", current_set=next_set)
-            await bot.send_message(
-                chat_id=chat_id,
-                text=f"✅ SET {set_id} COMPLETE\n━━━━━━━━━━━━━━━━━━━"
+            await bot.send_message(chat_id=chat_id, text=f"✅ SET {set_id} COMPLETE\n━━━━━━━━━━━━━━━━━━━"
             )
-            await asyncio.sleep(1)
+            await asyncio.sleep(1, **_msg_kwargs())
             await show_set_preview(bot, chat_id, next_set)
             await asyncio.sleep(1)
-            await bot.send_message(
-                chat_id=chat_id,
-                text=f"👑 Host: /resume to start SET {next_set}"
-            )
+            await bot.send_message(chat_id=chat_id, text=f"👑 Host: /resume to start SET {next_set}"
+            , **_msg_kwargs())
             return
 
         update_state(
@@ -181,7 +182,7 @@ async def next_player(bot, chat_id):
                 f"⚽ {player['name']}\n📍 {player['position']} | 💰 Base: {math.ceil(player['base_price'])}M\n"
                 "🔓 Bidding OPEN\n━━━━━━━━━━━━━━━━━━━\n💡 /bid <amount> to bid")
         msg = await bot.send_message(chat_id=chat_id, text=text)
-        update_state(live_message_id=msg.message_id)
+        update_state(live_message_id=msg.message_id, **_msg_kwargs())
 
 
 async def auction_loop(bot, chat_id):
@@ -189,12 +190,14 @@ async def auction_loop(bot, chat_id):
         await asyncio.sleep(0.5)
         try:
             state = get_state()
-            if state["status"] == "paused":
-                continue
-            if state["status"] == "set_complete":
+            
+            # Skip if paused or set_complete
+            if state["status"] in ("paused", "set_complete"):
                 continue
             if state["status"] != "live":
                 continue
+
+            # Force get player if none active
             if not state["current_player_id"]:
                 await next_player(bot, chat_id)
                 continue
@@ -204,6 +207,7 @@ async def auction_loop(bot, chat_id):
                 update_state(current_player_id=None)
                 continue
 
+            # Force timer reset if stuck at 0
             if state["last_bid_time"] == 0:
                 update_state(last_bid_time=time.time())
                 continue
@@ -216,16 +220,16 @@ async def auction_loop(bot, chat_id):
                 await finalize_sold(bot, chat_id)
                 if all_teams_full():
                     await end_auction(bot, chat_id)
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(1.0)
                 continue
 
-            # Send reminder as SEPARATE message
             if countdown in REMINDER_AT and state["last_reminder"] != countdown:
                 team = get_team(state["highest_team_id"]) if state["highest_team_id"] else None
                 bid_line = f"🔥 {state['highest_bid']}M by {team['name']}" if team else "❌ No bids yet"
                 await bot.send_message(
                     chat_id=chat_id,
-                    text=f"⏰ {countdown} seconds left!\n{bid_line}"
+                    text=f"⏰ {countdown} seconds left!\n{bid_line}",
+                    **_msg_kwargs()
                 )
                 update_state(last_reminder=countdown)
 
@@ -287,7 +291,7 @@ async def skip_player(bot, chat_id):
     if not player:
         return False, "Player not found"
     update_player(player["id"], status="unsold")
-    await bot.send_message(chat_id=chat_id, text=f"⏭️ SKIPPED\n⚽ {player['name']} → UNSOLD")
+    await bot.send_message(chat_id=chat_id, text=f"⏭️ SKIPPED\n⚽ {player['name']} → UNSOLD", **_msg_kwargs())
     update_state(current_player_id=None, highest_bid=0, highest_team_id=None, last_bid_time=0, last_reminder=None)
     return True, "skipped"
 
@@ -309,7 +313,7 @@ async def start_round2(bot, chat_id):
     update_state(status="live", last_bid_time=0, highest_bid=0,
                  highest_team_id=None, current_player_id=None,
                  last_reminder=None, live_message_id=None)
-    await bot.send_message(chat_id=chat_id, text=f"📦 ROUND 2: {cnt} unsold players back in pool")
+    await bot.send_message(chat_id=chat_id, text=f"📦 ROUND 2: {cnt} unsold players back in pool", **_msg_kwargs())
     return True, "started"
 
 
